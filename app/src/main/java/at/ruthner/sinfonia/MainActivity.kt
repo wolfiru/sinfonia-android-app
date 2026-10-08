@@ -11,7 +11,47 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.LinearEasing
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.StartOffset
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.snap
+import androidx.compose.animation.core.spring
+import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.gestures.detectHorizontalDragGestures
+import androidx.compose.foundation.lazy.LazyListState
+import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.material3.ProvideTextStyle
+import androidx.compose.ui.geometry.CornerRadius
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.hapticfeedback.HapticFeedback
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.platform.LocalHapticFeedback
+import androidx.compose.ui.text.TextStyle
+import androidx.compose.animation.Crossfade
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.slideOutVertically
 import androidx.compose.foundation.background
+import androidx.compose.foundation.gestures.Orientation
+import androidx.compose.foundation.gestures.draggable
+import androidx.compose.foundation.gestures.rememberDraggableState
+import androidx.compose.foundation.layout.offset
+import androidx.compose.ui.draw.BlurredEdgeTreatment
+import androidx.compose.ui.draw.alpha
+import androidx.compose.ui.draw.blur
+import androidx.compose.ui.draw.clipToBounds
+import androidx.compose.ui.draw.shadow
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.unit.IntOffset
+import coil.request.ImageRequest
+import kotlin.math.roundToInt
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -40,18 +80,15 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
-import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.Slider
 import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.darkColorScheme
-import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
@@ -70,13 +107,13 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
+import androidx.core.splashscreen.SplashScreen.Companion.installSplashScreen
 import androidx.lifecycle.viewmodel.compose.viewModel
 import coil.compose.AsyncImage
 import kotlinx.coroutines.delay
@@ -97,12 +134,17 @@ private val Colors = darkColorScheme(
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
+        installSplashScreen()
         enableEdgeToEdge(
             statusBarStyle = SystemBarStyle.dark(android.graphics.Color.TRANSPARENT),
             navigationBarStyle = SystemBarStyle.dark(android.graphics.Color.TRANSPARENT),
         )
         super.onCreate(savedInstanceState)
-        setContent { MaterialTheme(colorScheme = Colors) { App() } }
+        setContent {
+            MaterialTheme(colorScheme = Colors) {
+                ProvideTextStyle(TextStyle(fontFamily = Body)) { App() }
+            }
+        }
     }
 }
 
@@ -135,6 +177,7 @@ private fun App(vm: MainViewModel = viewModel()) {
             .fillMaxSize()
             .background(Brush.verticalGradient(listOf(Color(0xFF15111F), Ink, Ink)))
     ) {
+        CoverBackdrop(vm.currentTrack?.cover, strength = 0.55f)
         Column(Modifier.fillMaxSize()) {
             Box(Modifier.weight(1f).statusBarsPadding()) {
                 val album = vm.albums.firstOrNull { it.number == screen }
@@ -154,9 +197,41 @@ private fun App(vm: MainViewModel = viewModel()) {
             if (vm.currentTrack != null) MiniPlayer(vm, onOpen = { showPlayer = true })
             else Spacer(Modifier.navigationBarsPadding())
         }
-    }
 
-    if (showPlayer && vm.currentTrack != null) PlayerSheet(vm, onClose = { showPlayer = false })
+        AnimatedVisibility(
+            visible = showPlayer && vm.currentTrack != null,
+            enter = slideInVertically(tween(320)) { it },
+            exit = slideOutVertically(tween(260)) { it },
+        ) {
+            PlayerScreen(vm, onClose = { showPlayer = false })
+        }
+    }
+    BackHandler(enabled = showPlayer) { showPlayer = false }
+}
+
+/**
+ * Das Cover des laufenden Songs als weichgezeichneter, abgedunkelter Hintergrund.
+ * Ab Android 12 echter Blur, davor reicht das winzig geladene, hochskalierte Bild.
+ */
+@Composable
+private fun CoverBackdrop(cover: String?, strength: Float, modifier: Modifier = Modifier) {
+    val context = LocalContext.current
+    Crossfade(targetState = cover, animationSpec = tween(700), modifier = modifier.fillMaxSize(), label = "backdrop") { c ->
+        if (c != null) {
+            Box(Modifier.fillMaxSize().clipToBounds()) {
+                AsyncImage(
+                    model = ImageRequest.Builder(context).data(c).size(96).build(),
+                    contentDescription = null, contentScale = ContentScale.Crop,
+                    modifier = Modifier.fillMaxSize().blur(40.dp, BlurredEdgeTreatment.Unbounded).alpha(strength),
+                )
+                Box(
+                    Modifier.fillMaxSize().background(
+                        Brush.verticalGradient(listOf(Ink.copy(alpha = 0.35f), Ink.copy(alpha = 0.75f), Ink.copy(alpha = 0.95f)))
+                    )
+                )
+            }
+        }
+    }
 }
 
 @Composable
@@ -208,7 +283,7 @@ private fun Home(vm: MainViewModel, open: (Int) -> Unit, start: (() -> Unit) -> 
     ) {
         item(span = { GridItemSpan(maxLineSpan) }) {
             Column(Modifier.padding(top = 12.dp, bottom = 6.dp)) {
-                Text("Sinfonia Technica", color = Paper, fontFamily = FontFamily.Serif, fontWeight = FontWeight.SemiBold, fontSize = 32.sp)
+                Text("Sinfonia Technica", color = Paper, fontFamily = Display, fontWeight = FontWeight.SemiBold, fontSize = 38.sp)
                 Text(
                     "Klassik trifft Techno · ${vm.albums.size} Alben, ${vm.allTracks.size} Songs",
                     color = PaperDim, fontSize = 14.sp, modifier = Modifier.padding(top = 4.dp),
@@ -230,8 +305,8 @@ private fun Home(vm: MainViewModel, open: (Int) -> Unit, start: (() -> Unit) -> 
         }
         items(vm.albums, key = { it.number }) { a ->
             Column(Modifier.clip(RoundedCornerShape(16.dp)).clickable { open(a.number) }) {
-                AsyncImage(
-                    model = a.cover, contentDescription = "Cover ${a.label}", contentScale = ContentScale.Crop,
+                Cover(
+                    a.cover, "Cover ${a.label}",
                     modifier = Modifier.fillMaxWidth().aspectRatio(1f).clip(RoundedCornerShape(16.dp)).background(Ink2),
                 )
                 Text(a.label, color = Paper, fontWeight = FontWeight.SemiBold, fontSize = 16.sp, modifier = Modifier.padding(top = 8.dp, start = 2.dp))
@@ -249,22 +324,25 @@ private fun TrackScreen(
     vm: MainViewModel, title: String, sub: String, cover: String?, tracks: List<Track>,
     onBack: () -> Unit, start: (() -> Unit) -> Unit,
 ) {
-    LazyColumn(contentPadding = PaddingValues(bottom = 16.dp)) {
+    val listState = rememberLazyListState()
+    LazyColumn(state = listState, contentPadding = PaddingValues(bottom = 16.dp)) {
         item {
+            Box {
+            if (cover != null) HeaderBackdrop(cover, listState, Modifier.matchParentSize())
             Column(Modifier.padding(horizontal = 16.dp)) {
                 IconButton(onClick = onBack, modifier = Modifier.padding(top = 4.dp)) {
                     Icon(Ic.Back, "Zurück", tint = Paper)
                 }
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     if (cover != null) {
-                        AsyncImage(
-                            model = cover, contentDescription = null, contentScale = ContentScale.Crop,
+                        Cover(
+                            cover, null,
                             modifier = Modifier.size(112.dp).clip(RoundedCornerShape(14.dp)).background(Ink2),
                         )
                         Spacer(Modifier.width(16.dp))
                     }
                     Column {
-                        Text(title, color = Paper, fontFamily = FontFamily.Serif, fontWeight = FontWeight.SemiBold, fontSize = 24.sp, lineHeight = 28.sp)
+                        Text(title, color = Paper, fontFamily = Display, fontWeight = FontWeight.SemiBold, fontSize = 28.sp, lineHeight = 32.sp)
                         Text(sub, color = PaperDim, fontSize = 13.sp, lineHeight = 18.sp, modifier = Modifier.padding(top = 4.dp))
                     }
                 }
@@ -279,6 +357,7 @@ private fun TrackScreen(
                 }
                 Spacer(Modifier.height(10.dp))
             }
+            }
         }
         itemsIndexed(tracks, key = { _, t -> t.key }) { i, t ->
             val active = vm.currentTrack?.key == t.key
@@ -289,10 +368,10 @@ private fun TrackScreen(
                     .padding(start = 16.dp, end = 4.dp, top = 4.dp, bottom = 4.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                Text(
-                    "${i + 1}", color = if (active) Gold else PaperDim, fontSize = 14.sp,
-                    textAlign = TextAlign.End, modifier = Modifier.width(24.dp),
-                )
+                Box(Modifier.width(24.dp), contentAlignment = Alignment.CenterEnd) {
+                    if (active) EqualizerBars(vm.isPlaying, Modifier.size(16.dp))
+                    else Text("${i + 1}", color = PaperDim, fontSize = 14.sp, textAlign = TextAlign.End)
+                }
                 Spacer(Modifier.width(14.dp))
                 Column(Modifier.weight(1f)) {
                     Text(
@@ -338,7 +417,13 @@ private fun rememberPosition(vm: MainViewModel): Long {
 private fun MiniPlayer(vm: MainViewModel, onOpen: () -> Unit) {
     val t = vm.currentTrack ?: return
     val pos = rememberPosition(vm)
-    Surface(color = Color(0xFF1A1726), modifier = Modifier.fillMaxWidth()) {
+    val haptic = LocalHapticFeedback.current
+    Surface(
+        color = Color(0xCC1A1726),
+        modifier = Modifier.fillMaxWidth().swipeSkip(
+            onNext = { haptic.tick(); vm.next() }, onPrevious = { haptic.tick(); vm.previous() },
+        ),
+    ) {
         Column(Modifier.navigationBarsPadding()) {
             LinearProgressIndicator(
                 progress = { if (vm.durationMs > 0) (pos.toFloat() / vm.durationMs).coerceIn(0f, 1f) else 0f },
@@ -348,8 +433,8 @@ private fun MiniPlayer(vm: MainViewModel, onOpen: () -> Unit) {
                 Modifier.clickable(onClick = onOpen).padding(start = 12.dp, end = 4.dp, top = 8.dp, bottom = 8.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                AsyncImage(
-                    model = t.cover, contentDescription = null, contentScale = ContentScale.Crop,
+                Cover(
+                    t.cover, null,
                     modifier = Modifier.size(46.dp).clip(RoundedCornerShape(8.dp)).background(Ink2),
                 )
                 Spacer(Modifier.width(12.dp))
@@ -357,19 +442,18 @@ private fun MiniPlayer(vm: MainViewModel, onOpen: () -> Unit) {
                     Text(t.title, color = Paper, fontWeight = FontWeight.SemiBold, fontSize = 15.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
                     Text(t.albumLabel, color = PaperDim, fontSize = 12.sp, maxLines = 1)
                 }
-                IconButton(onClick = { vm.togglePlay() }) {
+                IconButton(onClick = { haptic.press(); vm.togglePlay() }) {
                     if (vm.isBuffering) CircularProgressIndicator(color = Gold, strokeWidth = 2.dp, modifier = Modifier.size(22.dp))
                     else Icon(if (vm.isPlaying) Ic.Pause else Ic.Play, if (vm.isPlaying) "Pause" else "Abspielen", tint = Paper, modifier = Modifier.size(30.dp))
                 }
-                IconButton(onClick = { vm.next() }) { Icon(Ic.Next, "Nächster Song", tint = Paper) }
+                IconButton(onClick = { haptic.tick(); vm.next() }) { Icon(Ic.Next, "Nächster Song", tint = Paper) }
             }
         }
     }
 }
 
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun PlayerSheet(vm: MainViewModel, onClose: () -> Unit) {
+private fun PlayerScreen(vm: MainViewModel, onClose: () -> Unit) {
     val t = vm.currentTrack ?: return
     val pos = rememberPosition(vm)
     val sleep by SleepTimer.state.collectAsState()
@@ -377,26 +461,67 @@ private fun PlayerSheet(vm: MainViewModel, onClose: () -> Unit) {
     var dragValue by remember { mutableFloatStateOf(0f) }
     val dur = vm.durationMs.coerceAtLeast(1L)
 
-    ModalBottomSheet(
-        onDismissRequest = onClose,
-        sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
-        containerColor = Color(0xFF12101B),
-        contentColor = Paper,
+    // Nach unten wischen schließt den Player
+    var offsetY by remember { mutableFloatStateOf(0f) }
+    val dismissPx = with(androidx.compose.ui.platform.LocalDensity.current) { 140.dp.toPx() }
+    val coverScale by animateFloatAsState(if (vm.isPlaying) 1f else 0.9f, tween(400), label = "coverScale")
+    val haptic = LocalHapticFeedback.current
+    var swipeX by remember { mutableFloatStateOf(0f) }
+    var swiping by remember { mutableStateOf(false) }
+    val coverShift by animateFloatAsState(swipeX, if (swiping) snap() else spring(), label = "coverShift")
+
+    Box(
+        Modifier
+            .fillMaxSize()
+            .offset { IntOffset(0, offsetY.roundToInt()) }
+            .background(Ink)
+            .pointerInput(Unit) {}
+            .draggable(
+                orientation = Orientation.Vertical,
+                state = rememberDraggableState { offsetY = (offsetY + it).coerceAtLeast(0f) },
+                onDragStopped = { if (offsetY > dismissPx) onClose(); offsetY = 0f },
+            )
     ) {
+        CoverBackdrop(t.cover, strength = 0.8f)
         Column(
-            Modifier.fillMaxWidth().padding(horizontal = 24.dp).padding(bottom = 24.dp),
+            Modifier.fillMaxSize().statusBarsPadding().navigationBarsPadding().padding(horizontal = 24.dp).padding(bottom = 16.dp),
             horizontalAlignment = Alignment.CenterHorizontally,
         ) {
-            AsyncImage(
-                model = t.cover, contentDescription = "Cover", contentScale = ContentScale.Crop,
-                modifier = Modifier.fillMaxWidth(0.82f).aspectRatio(1f).clip(RoundedCornerShape(20.dp)).background(Ink2),
-            )
-            Spacer(Modifier.height(20.dp))
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                IconButton(onClick = onClose) { Icon(Ic.Down, "Schließen", tint = Paper, modifier = Modifier.size(30.dp)) }
+                Text(
+                    "Läuft gerade", color = PaperDim, fontSize = 13.sp, textAlign = TextAlign.Center,
+                    modifier = Modifier.weight(1f),
+                )
+                Box(Modifier.size(48.dp), contentAlignment = Alignment.Center) {
+                    EqualizerBars(vm.isPlaying, Modifier.size(22.dp))
+                }
+            }
+            Box(Modifier.weight(1f).fillMaxWidth().padding(vertical = 12.dp), contentAlignment = Alignment.Center) {
+                Cover(
+                    t.cover, "Cover",
+                    modifier = Modifier
+                        .fillMaxWidth(0.9f)
+                        .aspectRatio(1f)
+                        .graphicsLayer {
+                            scaleX = coverScale; scaleY = coverScale
+                            translationX = coverShift / 3f
+                            alpha = 1f - (kotlin.math.abs(coverShift) / 900f).coerceAtMost(0.4f)
+                        }
+                        .swipeSkip(
+                            onNext = { haptic.tick(); vm.next() }, onPrevious = { haptic.tick(); vm.previous() },
+                            onDrag = { swiping = it != null; swipeX = it ?: 0f },
+                        )
+                        .shadow(28.dp, RoundedCornerShape(24.dp), ambientColor = Color.Black, spotColor = Color.Black)
+                        .clip(RoundedCornerShape(24.dp))
+                        .background(Ink2),
+                )
+            }
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Column(Modifier.weight(1f)) {
                     Text(
-                        t.title, color = Paper, fontFamily = FontFamily.Serif, fontWeight = FontWeight.SemiBold,
-                        fontSize = 24.sp, lineHeight = 28.sp, maxLines = 2, overflow = TextOverflow.Ellipsis,
+                        t.title, color = Paper, fontFamily = Display, fontWeight = FontWeight.SemiBold,
+                        fontSize = 28.sp, lineHeight = 32.sp, maxLines = 2, overflow = TextOverflow.Ellipsis,
                     )
                     Text("${t.albumLabel} · ${t.albumSub}", color = PaperDim, fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
                 }
@@ -418,17 +543,17 @@ private fun PlayerSheet(vm: MainViewModel, onClose: () -> Unit) {
                 IconButton(onClick = { vm.toggleShuffle() }) {
                     Icon(Ic.Shuffle, if (vm.shuffle) "Mischen aus" else "Mischen ein", tint = if (vm.shuffle) Gold else PaperDim)
                 }
-                IconButton(onClick = { vm.previous() }, modifier = Modifier.size(56.dp)) {
+                IconButton(onClick = { haptic.tick(); vm.previous() }, modifier = Modifier.size(56.dp)) {
                     Icon(Ic.Prev, "Zurück", tint = Paper, modifier = Modifier.size(36.dp))
                 }
                 Box(
-                    Modifier.size(72.dp).clip(CircleShape).background(Gold).clickable { vm.togglePlay() },
+                    Modifier.size(72.dp).clip(CircleShape).background(Gold).clickable { haptic.press(); vm.togglePlay() },
                     contentAlignment = Alignment.Center,
                 ) {
                     if (vm.isBuffering) CircularProgressIndicator(color = Ink, strokeWidth = 3.dp, modifier = Modifier.size(30.dp))
                     else Icon(if (vm.isPlaying) Ic.Pause else Ic.Play, if (vm.isPlaying) "Pause" else "Abspielen", tint = Ink, modifier = Modifier.size(40.dp))
                 }
-                IconButton(onClick = { vm.next() }, modifier = Modifier.size(56.dp)) {
+                IconButton(onClick = { haptic.tick(); vm.next() }, modifier = Modifier.size(56.dp)) {
                     Icon(Ic.Next, "Nächster Song", tint = Paper, modifier = Modifier.size(36.dp))
                 }
                 IconButton(onClick = { vm.toggleRepeat() }) {
@@ -470,5 +595,104 @@ private fun SleepControl(sleep: Sleep) {
                 DropdownMenuItem(text = { Text("Timer aus") }, onClick = { SleepTimer.set(Sleep.Off); open = false })
             }
         }
+    }
+}
+
+
+private fun HapticFeedback.tick() = performHapticFeedback(HapticFeedbackType.TextHandleMove)
+private fun HapticFeedback.press() = performHapticFeedback(HapticFeedbackType.LongPress)
+
+/** Wisch nach links = nächster Song, nach rechts = vorheriger. [onDrag] meldet die aktuelle Verschiebung (null = Ende). */
+private fun Modifier.swipeSkip(onNext: () -> Unit, onPrevious: () -> Unit, onDrag: (Float?) -> Unit = {}): Modifier =
+    pointerInput(Unit) {
+        var total = 0f
+        val threshold = 110.dp.toPx()
+        detectHorizontalDragGestures(
+            onDragStart = { total = 0f },
+            onDragEnd = {
+                if (total < -threshold) onNext() else if (total > threshold) onPrevious()
+                onDrag(null)
+            },
+            onDragCancel = { onDrag(null) },
+        ) { _, delta -> total += delta; onDrag(total) }
+    }
+
+/** Cover mit Schimmer, solange es lädt, und Notenzeichen als Ersatz, falls es fehlt. */
+@Composable
+private fun Cover(model: String, description: String?, modifier: Modifier = Modifier) {
+    var state by remember(model) { mutableStateOf(0) } // 0 lädt, 1 fertig, 2 Fehler
+    Box(modifier, contentAlignment = Alignment.Center) {
+        if (state == 0) Shimmer(Modifier.matchParentSize())
+        if (state == 2) Text("♪", color = Gold, fontSize = 28.sp)
+        AsyncImage(
+            model = model, contentDescription = description, contentScale = ContentScale.Crop,
+            onSuccess = { state = 1 }, onError = { state = 2 },
+            modifier = Modifier.matchParentSize(),
+        )
+    }
+}
+
+@Composable
+private fun Shimmer(modifier: Modifier) {
+    val t = rememberInfiniteTransition(label = "shimmer")
+    val x by t.animateFloat(
+        -400f, 1200f, infiniteRepeatable(tween(1400, easing = LinearEasing), RepeatMode.Restart), label = "x",
+    )
+    Box(
+        modifier.background(
+            Brush.linearGradient(
+                listOf(Ink2, Color(0xFF26223A), Ink2), start = Offset(x, 0f), end = Offset(x + 400f, 400f),
+            )
+        )
+    )
+}
+
+/** Kleine Pegelanzeige: Balken tanzen, solange gespielt wird, sonst stehen sie niedrig. */
+@Composable
+private fun EqualizerBars(playing: Boolean, modifier: Modifier = Modifier, color: Color = Gold) {
+    val levels = if (playing) {
+        val t = rememberInfiniteTransition(label = "eq")
+        listOf(520, 380, 610, 450).mapIndexed { i, ms ->
+            t.animateFloat(
+                0.2f, 1f,
+                infiniteRepeatable(tween(ms, easing = LinearEasing), RepeatMode.Reverse, initialStartOffset = StartOffset(i * 90)),
+                label = "bar$i",
+            ).value
+        }
+    } else listOf(0.25f, 0.25f, 0.25f, 0.25f)
+    Canvas(modifier) {
+        val n = levels.size
+        val gap = size.width * 0.12f
+        val w = (size.width - gap * (n - 1)) / n
+        levels.forEachIndexed { i, l ->
+            val h = size.height * l
+            drawRoundRect(color, Offset(i * (w + gap), size.height - h), Size(w, h), CornerRadius(w / 2))
+        }
+    }
+}
+
+/** Weichgezeichnetes Album-Cover hinter dem Kopf der Songliste, das beim Scrollen mit halber Geschwindigkeit wegblendet. */
+@Composable
+private fun HeaderBackdrop(cover: String, state: LazyListState, modifier: Modifier) {
+    val context = LocalContext.current
+    Box(modifier.clipToBounds()) {
+        AsyncImage(
+            model = ImageRequest.Builder(context).data(cover).size(96).build(),
+            contentDescription = null, contentScale = ContentScale.Crop,
+            modifier = Modifier
+                .fillMaxSize()
+                .graphicsLayer {
+                    val off = if (state.firstVisibleItemIndex == 0) state.firstVisibleItemScrollOffset.toFloat() else size.height
+                    translationY = off * 0.5f
+                    alpha = (1f - off / size.height).coerceIn(0f, 1f)
+                }
+                .blur(36.dp, BlurredEdgeTreatment.Unbounded)
+                .alpha(0.7f),
+        )
+        Box(
+            Modifier.fillMaxSize().background(
+                Brush.verticalGradient(listOf(Color.Transparent, Ink.copy(alpha = 0.9f)))
+            )
+        )
     }
 }

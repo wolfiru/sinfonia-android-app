@@ -1,3 +1,5 @@
+import java.util.Properties
+
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
@@ -19,7 +21,7 @@ android {
     // Fester Schlüssel für Sideload-Builds: neue APKs lassen sich über alte installieren.
     // Keystore und Passwörter stehen NICHT im Repo, sondern in keystore.properties
     // (siehe keystore.properties.example). Fehlt die Datei, wird mit dem Debug-Schlüssel signiert.
-    val keystoreProps = java.util.Properties().apply {
+    val keystoreProps = Properties().apply {
         val f = rootProject.file("keystore.properties")
         if (f.exists()) f.inputStream().use { load(it) }
     }
@@ -65,4 +67,5 @@ dependencies {
     implementation("androidx.media3:media3-datasource:$media3")
     implementation("androidx.media3:media3-database:$media3")
     implementation("io.coil-kt:coil-compose:2.7.0")
+    implementation("androidx.core:core-splashscreen:1.0.1")
 }
